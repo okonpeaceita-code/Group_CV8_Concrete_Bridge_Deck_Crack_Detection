@@ -3,10 +3,15 @@ import numpy as np
 from PIL import Image
 import tensorflow as tf
 
+# ── Constants ─────────────────────────────────────────────────────────────────
+MODEL_PATH  = "custom_cnn_best.keras"
+IMG_SIZE    = (224, 224)
+THRESHOLD   = 0.6
+CLASS_NAMES = ["cracked", "not_cracked"]   # must match training class order
+
 # ── Page config ───────────────────────────────────────────────────────────────
 st.set_page_config(
     page_title="Concrete Crack Detector",
-    page_icon="🔍",
     layout="centered",
 )
 
@@ -50,6 +55,10 @@ st.markdown("""
         background: #071a10;
         border: 1.5px solid #22c55e;
     }
+    .result-unknown {
+        background: #1a1a0a;
+        border: 1.5px solid #eab308;
+    }
     .result-label {
         font-size: 1.5rem;
         font-weight: 700;
@@ -57,6 +66,7 @@ st.markdown("""
     }
     .result-cracked .result-label { color: #ef4444; }
     .result-safe    .result-label { color: #22c55e; }
+    .result-unknown .result-label { color: #eab308; }
     .result-sub {
         font-size: 0.85rem;
         color: #9ca3af;
@@ -69,6 +79,7 @@ st.markdown("""
     }
     .result-cracked .score-mono { color: #f87171; }
     .result-safe    .score-mono { color: #4ade80; }
+    .result-unknown .score-mono { color: #facc15; }
 
     .metric-row {
         display: flex;
@@ -119,72 +130,112 @@ st.markdown("""
 # ── Model loading ─────────────────────────────────────────────────────────────
 @st.cache_resource
 def load_model():
-    return tf.keras.models.load_model("custom_cnn_best.keras")
+    return tf.keras.models.load_model(MODEL_PATH)
+
+# ── Preprocessing ─────────────────────────────────────────────────────────────
+def preprocess(image: Image.Image) -> np.ndarray:
+    img = image.convert("RGB").resize(IMG_SIZE)
+    arr = np.array(img, dtype=np.float32)   # NO /255
+    return np.expand_dims(arr, axis=0)
 
 model = load_model()
-IMG_SIZE = (224, 224)
 
 # ── Hero ──────────────────────────────────────────────────────────────────────
 st.markdown("""
 <div class="hero">
-    <h1>🔍 Concrete Crack Detector</h1>
-    <p>Upload a concrete surface image — the model will tell you whether it is cracked.</p>
+    <h1>Concrete Crack Detector</h1>
+    <p>Upload a concrete surface image or take a photo — the model will tell you whether it is cracked.</p>
 </div>
 """, unsafe_allow_html=True)
 
-# ── Upload ────────────────────────────────────────────────────────────────────
-uploaded = st.file_uploader(
-    "Choose an image",
-    type=["jpg", "jpeg", "png", "bmp", "webp"],
-    label_visibility="collapsed",
-)
-st.markdown('<p class="upload-hint">Supported formats: JPG · PNG · BMP · WEBP</p>', unsafe_allow_html=True)
+# ── Input — upload or camera ──────────────────────────────────────────────────
+tab_upload, tab_camera = st.tabs(["Upload Image", "Take Photo"])
+
+image = None
+caption = None
+
+with tab_upload:
+    uploaded = st.file_uploader(
+        "Choose an image",
+        type=["jpg", "jpeg", "png", "bmp", "webp"],
+        label_visibility="collapsed",
+    )
+    st.markdown(
+        '<p class="upload-hint">Supported formats: JPG · PNG · BMP · WEBP</p>',
+        unsafe_allow_html=True,
+    )
+    if uploaded:
+        image = Image.open(uploaded)
+        caption = uploaded.name
+
+with tab_camera:
+    captured = st.camera_input("Point camera at a concrete surface")
+    if captured:
+        image = Image.open(captured)
+        caption = "Camera capture"
 
 # ── Inference ─────────────────────────────────────────────────────────────────
-if uploaded:
-    image = Image.open(uploaded).convert("RGB")
-    col_img, _ = st.columns([1, 0.05])
-    with col_img:
-        st.image(image, use_container_width=True, caption=uploaded.name)
+if image:
+    st.image(image, width="stretch", caption=caption)
 
-    img_array = np.array(image.resize(IMG_SIZE)) / 255.0
-    img_array = np.expand_dims(img_array, axis=0)
+    with st.spinner("Analysing..."):
+        tensor = preprocess(image)
+        raw = model.predict(tensor, verbose=0)[0]
 
-    with st.spinner("Analysing…"):
-        prediction = model.predict(img_array, verbose=0)[0][0]
+    p_cracked = float(raw[0])
+    p_not_cracked = float(raw[1])
+    max_prob = max(p_cracked, p_not_cracked)
+    pred_idx = int(np.argmax(raw))
 
-    # score close to 1 → cracked, close to 0 → not_cracked
-    is_cracked   = prediction >= 0.5
-    confidence   = prediction if is_cracked else 1 - prediction
-    score_display = f"{prediction:.4f}"
+    if max_prob < THRESHOLD:
+        label = "unrecognised"
+        score = max_prob
+    elif pred_idx == 0:
+        label = "cracked"
+        score = p_cracked
+    else:
+        label = "not_cracked"
+        score = p_not_cracked
 
-    if is_cracked:
+    if label == "cracked":
         st.markdown(f"""
         <div class="result-box result-cracked">
-            <div class="result-label">⚠️ Cracked</div>
-            <div class="score-mono">{score_display}</div>
-            <div class="result-sub">Crack score (closer to 1.0 = more severe)</div>
+            <div class="result-label">Cracked</div>
+            <div class="score-mono">{score:.4f}</div>
+            <div class="result-sub">Crack probability (threshold = {THRESHOLD})</div>
+        </div>
+        """, unsafe_allow_html=True)
+    elif label == "not_cracked":
+        st.markdown(f"""
+        <div class="result-box result-safe">
+            <div class="result-label">Not Cracked</div>
+            <div class="score-mono">{score:.4f}</div>
+            <div class="result-sub">Healthy probability (threshold = {THRESHOLD})</div>
         </div>
         """, unsafe_allow_html=True)
     else:
         st.markdown(f"""
-        <div class="result-box result-safe">
-            <div class="result-label">✅ Not Cracked</div>
-            <div class="score-mono">{score_display}</div>
-            <div class="result-sub">Crack score (closer to 0.0 = healthy surface)</div>
+        <div class="result-box result-unknown">
+            <div class="result-label">Unrecognised</div>
+            <div class="score-mono">{score:.4f}</div>
+            <div class="result-sub">Max confidence below threshold ({THRESHOLD})</div>
         </div>
         """, unsafe_allow_html=True)
 
     st.markdown(f"""
     <div class="metric-row">
-        <div class="metric-pill">Confidence<span>{confidence*100:.1f}%</span></div>
-        <div class="metric-pill">Raw Score<span>{prediction:.4f}</span></div>
-        <div class="metric-pill">Threshold<span>0.5000</span></div>
+        <div class="metric-pill">P(Cracked)<span>{p_cracked*100:.1f}%</span></div>
+        <div class="metric-pill">P(Not Cracked)<span>{p_not_cracked*100:.1f}%</span></div>
+        <div class="metric-pill">Threshold<span>{THRESHOLD:.1f}</span></div>
     </div>
     """, unsafe_allow_html=True)
 
     with st.expander("Model details"):
-        st.markdown("""
+        st.markdown(f"""
+        **Raw softmax:** `[{raw[0]:.6f}, {raw[1]:.6f}]`
+
+        **Class order:** `{CLASS_NAMES}`
+
         | Metric | Value |
         |---|---|
         | Accuracy | 96.47% |
@@ -202,14 +253,15 @@ if uploaded:
         *Evaluated on 1,502 test samples.*
         """)
 
-# ── Empty state ───────────────────────────────────────────────────────────────
 else:
     st.markdown("""
     <div style="text-align:center; padding: 2rem 0; color: #4b5563;">
-        <div style="font-size: 3rem; margin-bottom: 0.5rem;">🏗️</div>
-        <div style="font-size: 0.9rem;">No image uploaded yet. Drop one above to get started.</div>
+        <div style="font-size: 0.9rem;">No image yet. Upload one or take a photo to get started.</div>
     </div>
     """, unsafe_allow_html=True)
 
 st.markdown('<hr class="divider">', unsafe_allow_html=True)
-st.markdown('<div class="footer">Custom CNN · Trained on Concrete Crack Dataset · 96.47% accuracy</div>', unsafe_allow_html=True)
+st.markdown(
+    '<div class="footer">Custom CNN · Trained on Concrete Crack Dataset · 96.47% accuracy</div>',
+    unsafe_allow_html=True,
+)
